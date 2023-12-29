@@ -1,0 +1,92 @@
+#!/usr/bin/python
+# -*- coding:utf-8 -*-
+
+#dryer.py (driver.shl)
+#Free and Open source
+#J. Nolan (totorodad@gmail.com)
+
+import time
+import ADS1256
+import RPi.GPIO as GPIO
+import os
+import time
+import dryer_sms
+
+# update the following with your own tunes
+def dryer_done_sound():
+	os.system('mpg123 -q /home/pi/dryer/sounds/dryers_done.mp3')
+
+def system_up_sound():
+	os.system('mpg123 -q /home/pi/dryer/sounds/system_up.mp3')
+
+def armed_sound():
+	os.system('mpg123 -q /home/pi/dryer/sounds/drying.mp3')
+
+try:
+	ADC = ADS1256.ADS1256()
+	ADC.ADS1256_init()
+
+	#this calibration assume no current used
+	ADC_Value = ADC.ADS1256_GetAll()
+	offset = ADC_Value[2]*5.0/0x7fffff
+	print("Calibration: %lf" % offset)
+	offset = 2.4422 # value based on the above read calibration
+
+	system_up_sound()
+
+	peak_detect_time = 4 
+	peakc = 0.0
+	window_time = peak_detect_time+time.time()
+	armed = False
+	upper_current_threshold = 10.0
+	lower_current_threshold = 8.0
+	maxc = 50.0 # max current allowed to avoid inrush values
+	volts_per_amp = 0.0133
+	shutoff_detect_count = 225 # (15*60) / peak_detect_time
+	shutoff_counter = shutoff_detect_count
+
+	while(1):
+		ADC_Value = ADC.ADS1256_GetAll()
+		inc = abs((offset-(ADC_Value[2]*5.0/0x7fffff))/volts_per_amp)
+		rmsc = inc * .707
+
+		if rmsc > peakc and rmsc < maxc:
+			peakc = rmsc 
+			# print("peak found: %lf" % peakc)
+
+		if time.time() > window_time:
+			print ('2 ADC = %lf' % peakc)
+			window_time = peak_detect_time+time.time()
+			# If the current is flowing to the dryer to heat the clothes
+			# arm the dryer sound output
+			if peakc > upper_current_threshold and armed == False: 
+				armed = True
+				print("armed")
+				armed_sound()
+
+			# If armed and still high current then reset the shutdown counter
+			if peakc > upper_current_threshold and armed == True: 
+				shutoff_counter = shutoff_detect_count
+
+			# When the dryer output sound is armed and the current is low
+			# start counting down ever read cyles (about 4s)
+			if peakc < lower_current_threshold and armed == True:
+			        shutoff_counter = shutoff_counter - 1 
+				print("shutoff_counter: %d" % shutoff_counter)
+
+			# When the dryer sound is armed and has been low current for
+			# shutoff_detect_count cyles then play sound and
+			# disarm the sound making until the next high current draw is seen. 
+			if shutoff_counter <= 0 and armed == True:
+				dryer_done_sound()
+				dryer_sms.dryer_done_msg()
+				armed = False
+				shutoff_counter = shutoff_detect_count 
+
+			peakc = 0 # reset for the next quasi-peak detect
+
+except :
+	GPIO.cleanup()
+	print ("\r\nProgram end     ")
+	exit()
+
